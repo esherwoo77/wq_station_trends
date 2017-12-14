@@ -1,0 +1,131 @@
+---
+title: "WQ Station Trend Tests & Display"
+author: "Ed Sherwood <esherwood@epchc.org>"
+date: "December 14, 2017"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(leaflet)
+library(lubridate)
+library(rkt)
+```
+
+## Import Station Data
+
+Download water quality data from USF Water Atlas site in text (tab delimited format).
+
+```{r MC Water Quality}
+mc_data <- read_delim("G:/Ed/GIT_Projects/wq_station_trends/MC_River-Stream_Stations.txt", "\t", escape_double = FALSE, col_types = cols(SampleDate = col_datetime(format = "%m/%d/%Y %H:%M:%S AM")), trim_ws = TRUE)
+View(mc_data)
+```
+
+## Identify sites on a Map
+
+Show a simple map of the water quality sites.
+
+```{r wq site map, echo=FALSE}
+wqsites <- mc_data %>% 
+           select(StationName, WaterBodyName, Actual_Latitude, Actual_Longitude) %>% 
+           unique()
+
+map <- leaflet(wqsites) %>% 
+              addProviderTiles(providers$CartoDB.Positron) %>% 
+              addCircleMarkers(~Actual_Longitude, ~Actual_Latitude,
+                               radius = 6,
+                               stroke = FALSE,
+                               color = ~WaterBodyName,
+                               popup = ~as.character(paste('MC Station:', StationName)))
+map
+```
+
+## Run Seasonal Kendall-Tau Trend Tests on Individual Stations
+No QA/QC checks performed. Just a straight analysis of individual station POR data on TN values, as stored in the USF Water Atlas Site.
+
+```{r}
+mc_data$mo <- month(mc_data$SampleDate)
+mc_data$yr <- decimal_date(mc_data$SampleDate)
+
+
+ggplot(mc_data, aes(SampleDate, Result_Value)) + 
+  geom_point() +
+  facet_wrap(~StationName) +
+  ylab("Total Nitrogen (ug/L)") +
+  xlab("Date")
+
+#Plot results for each station individually
+for(var in unique(mc_data$StationName)) {
+  dev.new()
+  print( ggplot(mc_data[mc_data$StationName==var,], 
+                aes(SampleDate, Result_Value)) + 
+                geom_point() +
+                ggtitle(var) +
+                ylab("Total Nitrogen (ug/L)") +
+                xlab("Date"))
+}
+
+#Perform the Seasonal Kendall Tau Trend Test on Each Station
+
+datalist = list()
+
+for(var in unique(mc_data$StationName)) {
+  dat <- mc_data %>% 
+         filter(StationName == var)
+  out <- rkt(dat$yr, dat$Result_Value, dat$mo,correct=T, rep="a")
+  out$StationName <- var
+  datalist[[var]] <- out
+}
+
+all <- data.table::rbindlist(datalist)
+
+all <- all %>%
+       select(StationName, sl.corrected, sl, tau) %>% 
+       left_join(wqsites,all, by = "StationName")
+
+results <- all
+
+results$sl.corrected[is.na(results$sl.corrected)] <- results$sl
+
+attach(results)
+results$trend[results$tau > 0] <- "Up"
+results$trend[results$tau < 0] <- "Down"
+
+results$sig[results$sl.corrected > 0.05] <- "NS"
+results$sig[results$sl.corrected <= 0.05] <- "Lo"
+results$sig[results$sl.corrected <= 0.01] <- "Hi"
+
+results$trend[results$sig == "NS"] <- ""
+
+results$id <- as.factor(paste(results$trend, results$sig, sep = "")) 
+detach(results)
+
+results$icon <- ifelse(results$id %in% c("NANA", "NALo", "NAHi", "NS", NA), "NS",
+                  ifelse(results$id == "DownLo", "GrDoLo",
+                   ifelse(results$id == "DownHi", "GrDoHi",
+                    ifelse(results$id == "UpLo", "ReUpLo",                
+                     ifelse(results$id == "UpHi", "ReUpHi", NA)))))
+                  
+
+#Create some fancy icons for the map
+trendicons <- iconList(
+  GrDoLo = makeIcon("./green-down-arrow-icon-44134.png","./green-down-arrow-icon-44134.png", 12, 12),
+  GrDoHi = makeIcon("./green-down-arrow-icon-44134.png", "./green-down-arrow-icon-44134.png", 24, 24),
+  ReUpLo = makeIcon("./red-arrow-up-674833.png","./red-arrow-up-674833.png", 12, 12),
+  ReUpHi = makeIcon("./red-arrow-up-674833.png", "./red-arrow-up-674833.png", 24, 24),
+  NS = makeIcon("./Circle-icon.png","./Circle-icon.png", 12, 12)
+  )
+  
+html_legend <- "<H4>Manatee County WQ Trends</H4><br/><img src = 'http://www.tbeptech.org/DATA/icons/green-down-arrow-icon-44134.png' height='12' width='12'>Decreasing, Lo Sig.<br/><img src = 'http://www.tbeptech.org/DATA/icons/green-down-arrow-icon-44134.png' height='24' width='24'>Decreasing, Hi Sig.<br/><img src = 'http://www.tbeptech.org/DATA/icons/red-arrow-up-674833.png' height='12' width='12'>Increasing, Lo Sig.<br/><img src = 'http://www.tbeptech.org/DATA/icons/red-arrow-up-674833.png' height='24' width='24'>Decreasing, Hi Sig.<br/><img src = 'http://www.tbeptech.org/DATA/icons/Circle-icon.png' height='12' width='12'>No Trend"
+
+resultmap <- leaflet(results) %>% 
+              addProviderTiles(providers$CartoDB.Positron) %>%
+              #addTiles()  
+              addMarkers(~Actual_Longitude, ~Actual_Latitude,icon = ~trendicons[icon], label = ~StationName) %>% 
+              addControl(html = html_legend, position = "bottomleft")
+resultmap
+
+```
+
+
